@@ -26,7 +26,10 @@ fs.mkdirSync(BASE_DIR, {
 });
 
 function safeId(id) {
-  return String(id).replace(/[^0-9_-]/g, '_');
+  return String(id).replace(
+    /[^0-9_-]/g,
+    '_'
+  );
 }
 
 function sessionPath(telegramId) {
@@ -34,6 +37,79 @@ function sessionPath(telegramId) {
     BASE_DIR,
     safeId(telegramId)
   );
+}
+
+function waitForConnection(sock, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+
+    const timer = setTimeout(() => {
+      if (finished) return;
+
+      finished = true;
+
+      reject(
+        new Error(
+          'WhatsApp connection timed out before pairing could start.'
+        )
+      );
+    }, timeout);
+
+    const onUpdate = update => {
+      const { connection } = update;
+
+      if (connection === 'connecting') {
+        if (finished) return;
+
+        finished = true;
+        clearTimeout(timer);
+
+        sock.ev.off(
+          'connection.update',
+          onUpdate
+        );
+
+        resolve();
+      }
+
+      if (connection === 'open') {
+        if (finished) return;
+
+        finished = true;
+        clearTimeout(timer);
+
+        sock.ev.off(
+          'connection.update',
+          onUpdate
+        );
+
+        resolve();
+      }
+
+      if (connection === 'close') {
+        if (finished) return;
+
+        finished = true;
+        clearTimeout(timer);
+
+        sock.ev.off(
+          'connection.update',
+          onUpdate
+        );
+
+        reject(
+          new Error(
+            'WhatsApp connection closed before pairing code could be requested.'
+          )
+        );
+      }
+    };
+
+    sock.ev.on(
+      'connection.update',
+      onUpdate
+    );
+  });
 }
 
 async function createSession(telegramId) {
@@ -60,6 +136,7 @@ async function createSession(telegramId) {
 
   const sock = makeWASocket({
     version,
+
     auth: state,
 
     logger: pino({
@@ -75,21 +152,32 @@ async function createSession(telegramId) {
     ],
 
     markOnlineOnConnect: false,
+
+    connectTimeoutMs: 60000,
+
+    defaultQueryTimeoutMs: 60000,
+
+    keepAliveIntervalMs: 30000,
   });
 
   const session = {
     telegramId: id,
+
     sock,
 
     phone: null,
 
     connected: false,
+
     connecting: true,
 
     createdAt: Date.now(),
 
     pairingRequested: false,
+
     pairingCode: null,
+
+    closed: false,
   };
 
   sessions.set(id, session);
@@ -112,8 +200,13 @@ async function createSession(telegramId) {
 
       if (connection === 'open') {
         session.connected = true;
+
         session.connecting = false;
+
+        session.closed = false;
+
         session.pairingRequested = false;
+
         session.pairingCode = null;
 
         if (sock.user?.id) {
@@ -122,19 +215,23 @@ async function createSession(telegramId) {
         }
 
         console.log(
-          `[multi-session] Telegram ${id} connected as ${session.phone || 'unknown'}`
+          `[multi-session] ${id} connected as ${session.phone || 'unknown'}`
         );
       }
 
       if (connection === 'close') {
         session.connected = false;
+
         session.connecting = false;
+
+        session.closed = true;
 
         const statusCode =
           lastDisconnect?.error?.output?.statusCode;
 
         const shouldReconnect =
-          statusCode !== DisconnectReason.loggedOut;
+          statusCode !==
+          DisconnectReason.loggedOut;
 
         console.log(
           `[multi-session] ${id} closed. reconnect=${shouldReconnect} status=${statusCode || 'unknown'}`
@@ -170,10 +267,18 @@ async function requestPairingCode(
 ) {
   const id = String(telegramId);
 
-  let session = sessions.get(id);
+  if (!/^\d{8,15}$/.test(phone)) {
+    throw new Error(
+      'Invalid phone number. Use international format without + or spaces.'
+    );
+  }
+
+  let session =
+    sessions.get(id);
 
   if (!session) {
-    session = await createSession(id);
+    session =
+      await createSession(id);
   }
 
   if (session.connected) {
@@ -183,30 +288,37 @@ async function requestPairingCode(
   }
 
   if (
-    !phone ||
-    !/^\d{8,15}$/.test(phone)
+    session.pairingRequested &&
+    session.pairingCode
   ) {
-    throw new Error(
-      'Invalid phone number. Use international format without + or spaces. Example: 2348012345678'
-    );
+    return session.pairingCode;
   }
 
   session.phone = phone;
 
+  console.log(
+    `[multi-session] Preparing pairing code for ${id} (${phone})`
+  );
+
   /*
-   * WhatsApp/Baileys needs the socket connection
-   * to be initialized before requesting the code.
-   *
-   * Give the socket a short moment to establish
-   * its connection.
+   * Baileys documentation recommends requesting
+   * the pairing code from the connection.update
+   * lifecycle rather than guessing with a timer.
    */
-  await new Promise(resolve => {
-    setTimeout(resolve, 3500);
-  });
+
+  await waitForConnection(
+    session.sock
+  );
 
   if (session.connected) {
     throw new Error(
-      'This WhatsApp session became connected before the pairing code was requested.'
+      'WhatsApp connected before a pairing code was requested.'
+    );
+  }
+
+  if (session.closed) {
+    throw new Error(
+      'WhatsApp connection closed before pairing code request.'
     );
   }
 
@@ -218,19 +330,23 @@ async function requestPairingCode(
         phone
       );
 
-    session.pairingCode = String(code);
+    session.pairingCode =
+      String(code);
 
     console.log(
-      `[multi-session] Pairing code generated for Telegram ${id}`
+      `[multi-session] Pairing code generated for ${id}: ${session.pairingCode}`
     );
 
     return session.pairingCode;
+
   } catch (err) {
     session.pairingRequested = false;
 
+    session.pairingCode = null;
+
     console.error(
       `[multi-session] Pairing code failed for ${id}:`,
-      err
+      err.message
     );
 
     throw err;
@@ -245,10 +361,13 @@ function getSession(telegramId) {
   );
 }
 
-async function logoutSession(telegramId) {
+async function logoutSession(
+  telegramId
+) {
   const id = String(telegramId);
 
-  const session = sessions.get(id);
+  const session =
+    sessions.get(id);
 
   if (!session) {
     return false;
@@ -267,12 +386,8 @@ async function logoutSession(telegramId) {
 
   sessions.delete(id);
 
-  /*
-   * Remove saved WhatsApp authentication.
-   * This makes /logout a real logout instead
-   * of leaving old credentials on disk.
-   */
-  const dir = sessionPath(id);
+  const dir =
+    sessionPath(id);
 
   try {
     fs.rmSync(dir, {
@@ -289,7 +404,9 @@ async function logoutSession(telegramId) {
   return true;
 }
 
-function removeSession(telegramId) {
+function removeSession(
+  telegramId
+) {
   sessions.delete(
     String(telegramId)
   );
