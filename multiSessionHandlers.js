@@ -228,9 +228,17 @@ function attachSessionHandlers(sock, session) {
 
           const parsed = parseMessage(body);
 
+          console.log(
+            `[command-debug] body=${JSON.stringify(body)} parsed=${JSON.stringify(parsed)}`
+          );
+
           if (!parsed) continue;
 
           const command = commands.get(parsed.command);
+
+          console.log(
+            `[command-debug] command=${parsed.command} found=${!!command} handler=${command?.name || 'NONE'}`
+          );
 
           if (!command) continue;
 

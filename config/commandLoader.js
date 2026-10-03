@@ -4,20 +4,14 @@ const path = require('path');
 const COMMANDS_DIR = path.join(__dirname, '..', 'commands');
 
 /**
- * Walks the commands/ directory (including subfolders like commands/fun, commands/admin)
- * and returns a Map where every alias points at the same handler object.
+ * Loads every command from commands/ and maps:
  *
- * Each command file must export:
- * {
- *   name: 'ping',
- *   aliases: ['p', 'alive-check'],   // optional
- *   category: 'bot',                 // optional, used by .menu
- *   description: '...',
- *   ownerOnly: false,                // optional
- *   groupOnly: false,                // optional
- *   adminOnly: false,                // optional
- *   execute: async ({ sock, msg, from, sender, args, isGroup, isAdmin, isOwner }) => { ... }
- * }
+ *   command name -> command
+ *   alias        -> command
+ *
+ * The first registration wins.
+ * Duplicate aliases are skipped instead of silently overwriting
+ * an already working command.
  */
 function loadCommands() {
   const commands = new Map();
@@ -26,9 +20,13 @@ function loadCommands() {
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
+
       if (entry.isDirectory()) {
         walk(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith('.js')
+      ) {
         allFiles.push(fullPath);
       }
     }
@@ -37,36 +35,73 @@ function loadCommands() {
   walk(COMMANDS_DIR);
 
   function registerModule(mod, file) {
-    if (!mod || !mod.name || typeof mod.execute !== 'function') {
-      console.warn(`[commandLoader] Skipping a module in ${file} — missing name/execute`);
+    if (
+      !mod ||
+      !mod.name ||
+      typeof mod.execute !== 'function'
+    ) {
+      console.warn(
+        `[commandLoader] Skipping ${file} — missing name/execute`
+      );
       return;
     }
-    const names = [mod.name, ...(mod.aliases || [])];
+
+    const names = [
+      mod.name,
+      ...(Array.isArray(mod.aliases) ? mod.aliases : [])
+    ];
+
     for (const alias of names) {
-      const key = alias.toLowerCase();
+      const key = String(alias).toLowerCase().trim();
+
+      if (!key) continue;
+
       if (commands.has(key)) {
-        console.warn(`[commandLoader] Duplicate alias "${key}" (in ${file}) — overwriting`);
+        const existing = commands.get(key);
+
+        console.warn(
+          `[commandLoader] Duplicate "${key}" skipped: ` +
+          `${file} -> ${mod.name}; ` +
+          `keeping existing command -> ${existing.name}`
+        );
+
+        continue;
       }
+
       commands.set(key, mod);
     }
   }
 
   for (const file of allFiles) {
-    delete require.cache[require.resolve(file)];
-    const mod = require(file);
+    try {
+      delete require.cache[require.resolve(file)];
 
-    // a file can export { multi: [...] } to register several commands from one file
-    // (used by commands/prexzy/dynamic.js, which builds many commands from a config list)
-    if (mod && Array.isArray(mod.multi)) {
-      for (const sub of mod.multi) registerModule(sub, file);
-      continue;
+      const mod = require(file);
+
+      if (mod && Array.isArray(mod.multi)) {
+        for (const sub of mod.multi) {
+          registerModule(sub, file);
+        }
+      } else {
+        registerModule(mod, file);
+      }
+    } catch (err) {
+      console.error(
+        `[commandLoader] Failed to load ${file}:`,
+        err.message
+      );
     }
-
-    registerModule(mod, file);
   }
 
-  console.log(`[commandLoader] Loaded ${allFiles.length} command files, ${commands.size} total aliases`);
+  console.log(
+    `[commandLoader] Loaded ${allFiles.length} command files, ` +
+    `${commands.size} unique aliases`
+  );
+
   return commands;
 }
 
-module.exports = { loadCommands, COMMANDS_DIR };
+module.exports = {
+  loadCommands,
+  COMMANDS_DIR,
+};
