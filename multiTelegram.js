@@ -1,25 +1,36 @@
 require('dotenv').config();
 
 const TelegramBot = require('node-telegram-bot-api');
+
 const {
   createSession,
+  requestPairingCode,
   getSession,
   getAllSessions,
+  logoutSession,
 } = require('./telegramSessions');
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN || '';
 
 if (!TOKEN) {
-  console.log('[telegram] TELEGRAM_BOT_TOKEN is not configured.');
+  console.log(
+    '[telegram] TELEGRAM_BOT_TOKEN is not configured.'
+  );
+
   module.exports = null;
   return;
 }
 
-const bot = new TelegramBot(TOKEN, {
-  polling: true,
-});
+const bot = new TelegramBot(
+  TOKEN,
+  {
+    polling: true,
+  }
+);
 
-const BOT_NAME = '𓉳 ⃝𝗡𝗜𝗖𝗘𝗚𝗢𝗟𝗗₊ ⃝ 𝗠𝗢𝗡𓉳 ⃝ 𓃵';
+const BOT_NAME =
+  '𓉳 ⃝𝗡𝗜𝗖𝗘𝗚𝗢𝗟𝗗₊ ⃝ 𝗠𝗢𝗡𓉳 ⃝ 𓃵';
 
 function menuText() {
   return `${BOT_NAME}
@@ -36,182 +47,326 @@ Available commands:
 /logout
 
 Example:
+
 /pair 2348012345678
 
 Each Telegram account gets its own WhatsApp session.`;
 }
 
-bot.onText(/^\/start$/, async msg => {
-  await bot.sendMessage(msg.chat.id, menuText());
-});
+bot.onText(
+  /^\/start$/,
+  async msg => {
+    await bot.sendMessage(
+      msg.chat.id,
+      menuText()
+    );
+  }
+);
 
-bot.onText(/^\/help$/, async msg => {
-  await bot.sendMessage(
-    msg.chat.id,
-    `📚 NICEGOLD MON HELP
+bot.onText(
+  /^\/help$/,
+  async msg => {
+    await bot.sendMessage(
+      msg.chat.id,
+
+      `📚 NICEGOLD MON HELP
 
 /pair <number>
-Connect your WhatsApp.
+Generate your WhatsApp pairing code.
 
 /status
-Check your WhatsApp connection.
+Check the NICEGOLD MON server.
 
 /mystatus
-Show your own session.
+Check your own WhatsApp session.
 
 /logout
 Disconnect your WhatsApp session.
 
 Example:
-/pair 2348012345678`
-  );
-});
 
-bot.onText(/^\/pair(?:\s+(.+))?$/, async (msg, match) => {
-  const telegramId = String(msg.from.id);
-  const raw = (match?.[1] || '').trim();
-  const phone = raw.replace(/\D/g, '');
+/pair 2348012345678
 
-  if (!phone || phone.length < 8) {
-    return bot.sendMessage(
-      msg.chat.id,
-      'Usage: /pair 2348012345678'
+⚠️ Never share your WhatsApp pairing code with anyone.`
     );
   }
+);
 
-  try {
-    let session = getSession(telegramId);
+bot.onText(
+  /^\/pair(?:\s+(.+))?$/,
+  async (msg, match) => {
+    const telegramId =
+      String(msg.from.id);
 
-    if (!session) {
-      await bot.sendMessage(
-        msg.chat.id,
-        '⏳ Creating your private WhatsApp session...'
-      );
+    const raw =
+      (match?.[1] || '').trim();
 
-      session = await createSession(telegramId);
-    }
+    /*
+     * Remove spaces, +, -, brackets,
+     * and other formatting characters.
+     */
+    const phone =
+      raw.replace(/\D/g, '');
 
-    if (session.connected) {
+    if (
+      !phone ||
+      !/^\d{8,15}$/.test(phone)
+    ) {
       return bot.sendMessage(
         msg.chat.id,
-        `✅ Your WhatsApp session is already connected.\n\nNumber: ${session.phone || 'Connected'}`
+
+        `❌ Invalid WhatsApp number.
+
+Use international format without +, spaces or brackets.
+
+Example:
+
+/pair 2348012345678`
       );
     }
 
-    session.phone = phone;
+    try {
+      let session =
+        getSession(telegramId);
 
-    await bot.sendMessage(
-      msg.chat.id,
-      '⏳ Requesting your WhatsApp pairing code...'
-    );
+      if (
+        session?.connected
+      ) {
+        return bot.sendMessage(
+          msg.chat.id,
 
-    const code = await session.sock.requestPairingCode(phone);
+          `✅ Your WhatsApp is already connected.
 
-    const formatted =
-      String(code).match(/.{1,4}/g)?.join('-') || String(code);
+Number:
+${session.phone || phone}`
+        );
+      }
 
-    await bot.sendMessage(
-      msg.chat.id,
-      `🔐 NICEGOLD MON PAIRING CODE
+      await bot.sendMessage(
+        msg.chat.id,
+
+        `⏳ Preparing your private WhatsApp session...
+
+Number:
+${phone}
+
+Please wait...`
+      );
+
+      session =
+        await createSession(
+          telegramId
+        );
+
+      const code =
+        await requestPairingCode(
+          telegramId,
+          phone
+        );
+
+      /*
+       * Baileys/WhatsApp normally returns
+       * an 8-character pairing code.
+       */
+      const formatted =
+        String(code)
+          .replace(/[^A-Za-z0-9]/g, '')
+          .match(/.{1,4}/g)
+          ?.join('-') ||
+        String(code);
+
+      await bot.sendMessage(
+        msg.chat.id,
+
+        `🔐 NICEGOLD MON
+WHATSAPP PAIRING CODE
 
 ${formatted}
 
-On WhatsApp:
+📱 On your WhatsApp:
 
-Linked Devices
-→ Link a Device
-→ Link with phone number instead
-→ Enter the code above
+1. Open WhatsApp
+2. Go to Linked Devices
+3. Tap Link a Device
+4. Choose "Link with phone number instead"
+5. Enter the code above
 
-⚠️ Keep the pairing code private.`
-    );
+⏱️ Enter the code while it is still valid.
 
-  } catch (err) {
-    console.error('[telegram pair]', err);
+⚠️ Keep this code private.
+
+After WhatsApp accepts it, NICEGOLD MON will connect automatically.`
+      );
+
+    } catch (err) {
+      console.error(
+        '[telegram pair]',
+        err
+      );
+
+      await bot.sendMessage(
+        msg.chat.id,
+
+        `❌ Pairing failed.
+
+Reason:
+${err.message || 'Unknown error'}
+
+Try /pair again with your full international WhatsApp number.
+
+Example:
+/pair 2348012345678`
+      );
+    }
+  }
+);
+
+bot.onText(
+  /^\/status$/,
+  async msg => {
+    const sessions =
+      getAllSessions();
+
+    let connected = 0;
+
+    for (
+      const session
+      of sessions.values()
+    ) {
+      if (session.connected) {
+        connected++;
+      }
+    }
 
     await bot.sendMessage(
       msg.chat.id,
-      `❌ Pairing failed.
 
-${err.message}`
+      `📊 NICEGOLD MON SERVER
+
+Active sessions:
+${sessions.size}
+
+Connected WhatsApp sessions:
+${connected}
+
+Telegram bridge:
+ONLINE 🟢`
     );
   }
-});
+);
 
-bot.onText(/^\/status$/, async msg => {
-  const sessions = getAllSessions();
+bot.onText(
+  /^\/mystatus$/,
+  async msg => {
+    const telegramId =
+      String(msg.from.id);
 
-  const total = sessions.size;
+    const session =
+      getSession(telegramId);
 
-  let connected = 0;
+    if (!session) {
+      return bot.sendMessage(
+        msg.chat.id,
 
-  for (const session of sessions.values()) {
-    if (session.connected) connected++;
-  }
-
-  await bot.sendMessage(
-    msg.chat.id,
-    `📊 NICEGOLD MON SERVER
-
-Active sessions: ${total}
-Connected WhatsApp sessions: ${connected}
-Telegram bridge: ONLINE`
-  );
-});
-
-bot.onText(/^\/mystatus$/, async msg => {
-  const telegramId = String(msg.from.id);
-  const session = getSession(telegramId);
-
-  if (!session) {
-    return bot.sendMessage(
-      msg.chat.id,
-      `📱 Your session does not exist yet.
+        `📱 You don't have a WhatsApp session yet.
 
 Use:
+
 /pair 2348012345678`
-    );
-  }
-
-  await bot.sendMessage(
-    msg.chat.id,
-    `📱 YOUR NICEGOLD MON SESSION
-
-Status: ${session.connected ? 'CONNECTED 🟢' : 'CONNECTING 🟡'}
-Number: ${session.phone || 'Not connected yet'}
-Session: ACTIVE`
-  );
-});
-
-bot.onText(/^\/logout$/, async msg => {
-  const telegramId = String(msg.from.id);
-  const session = getSession(telegramId);
-
-  if (!session) {
-    return bot.sendMessage(
-      msg.chat.id,
-      'You do not currently have an active session.'
-    );
-  }
-
-  try {
-    if (session.sock?.logout) {
-      await session.sock.logout();
+      );
     }
-  } catch (err) {
-    console.warn('[telegram logout]', err.message);
+
+    let status =
+      'CONNECTING 🟡';
+
+    if (session.connected) {
+      status =
+        'CONNECTED 🟢';
+    }
+
+    await bot.sendMessage(
+      msg.chat.id,
+
+      `📱 YOUR NICEGOLD MON SESSION
+
+Status:
+${status}
+
+Number:
+${session.phone || 'Waiting for pairing'}
+
+Pairing code:
+${session.pairingCode || 'None'}
+
+Session:
+ACTIVE`
+    );
   }
+);
 
-  await bot.sendMessage(
-    msg.chat.id,
-    '🔌 Your NICEGOLD MON WhatsApp session has been disconnected.'
-  );
-});
+bot.onText(
+  /^\/logout$/,
+  async msg => {
+    const telegramId =
+      String(msg.from.id);
 
-bot.on('polling_error', err => {
-  console.error('[telegram polling]', err.message);
-});
+    const session =
+      getSession(telegramId);
 
-console.log('[telegram] multi-user bridge is online');
+    if (!session) {
+      return bot.sendMessage(
+        msg.chat.id,
+
+        'You do not currently have an active WhatsApp session.'
+      );
+    }
+
+    try {
+      await logoutSession(
+        telegramId
+      );
+
+      await bot.sendMessage(
+        msg.chat.id,
+
+        `🔌 NICEGOLD MON
+
+Your WhatsApp session has been disconnected.
+
+You can pair again with:
+
+/pair 2348012345678`
+      );
+
+    } catch (err) {
+      console.error(
+        '[telegram logout]',
+        err
+      );
+
+      await bot.sendMessage(
+        msg.chat.id,
+
+        `❌ Logout failed.
+
+${err.message}`
+      );
+    }
+  }
+);
+
+bot.on(
+  'polling_error',
+  err => {
+    console.error(
+      '[telegram polling]',
+      err.message
+    );
+  }
+);
+
+console.log(
+  '[telegram] multi-user bridge is online'
+);
 
 module.exports = bot;
