@@ -7,6 +7,7 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 
 const {
@@ -39,79 +40,6 @@ function sessionPath(telegramId) {
   );
 }
 
-function waitForConnection(sock, timeout = 15000) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
-
-    const timer = setTimeout(() => {
-      if (finished) return;
-
-      finished = true;
-
-      reject(
-        new Error(
-          'WhatsApp connection timed out before pairing could start.'
-        )
-      );
-    }, timeout);
-
-    const onUpdate = update => {
-      const { connection } = update;
-
-      if (connection === 'connecting') {
-        if (finished) return;
-
-        finished = true;
-        clearTimeout(timer);
-
-        sock.ev.off(
-          'connection.update',
-          onUpdate
-        );
-
-        resolve();
-      }
-
-      if (connection === 'open') {
-        if (finished) return;
-
-        finished = true;
-        clearTimeout(timer);
-
-        sock.ev.off(
-          'connection.update',
-          onUpdate
-        );
-
-        resolve();
-      }
-
-      if (connection === 'close') {
-        if (finished) return;
-
-        finished = true;
-        clearTimeout(timer);
-
-        sock.ev.off(
-          'connection.update',
-          onUpdate
-        );
-
-        reject(
-          new Error(
-            'WhatsApp connection closed before pairing code could be requested.'
-          )
-        );
-      }
-    };
-
-    sock.ev.on(
-      'connection.update',
-      onUpdate
-    );
-  });
-}
-
 async function createSession(telegramId) {
   const id = String(telegramId);
 
@@ -134,22 +62,26 @@ async function createSession(telegramId) {
     version,
   } = await fetchLatestBaileysVersion();
 
+  /*
+   * IMPORTANT:
+   * Use Baileys' official browser helper.
+   * Do not use a custom browser array here.
+   */
+  const browser =
+    Browsers.windows('Chrome');
+
   const sock = makeWASocket({
     version,
 
     auth: state,
+
+    browser,
 
     logger: pino({
       level: 'silent',
     }),
 
     printQRInTerminal: false,
-
-    browser: [
-      'NICEGOLD MON',
-      'Chrome',
-      '1.0.0',
-    ],
 
     markOnlineOnConnect: false,
 
@@ -171,13 +103,13 @@ async function createSession(telegramId) {
 
     connecting: true,
 
+    closed: false,
+
     createdAt: Date.now(),
 
     pairingRequested: false,
 
     pairingCode: null,
-
-    closed: false,
   };
 
   sessions.set(id, session);
@@ -189,9 +121,15 @@ async function createSession(telegramId) {
 
   sock.ev.on(
     'connection.update',
-    ({ connection, lastDisconnect }) => {
+    update => {
+      const {
+        connection,
+        lastDisconnect,
+      } = update;
+
       if (connection === 'connecting') {
         session.connecting = true;
+        session.closed = false;
 
         console.log(
           `[multi-session] ${id} connecting...`
@@ -200,13 +138,10 @@ async function createSession(telegramId) {
 
       if (connection === 'open') {
         session.connected = true;
-
         session.connecting = false;
-
         session.closed = false;
 
         session.pairingRequested = false;
-
         session.pairingCode = null;
 
         if (sock.user?.id) {
@@ -221,9 +156,7 @@ async function createSession(telegramId) {
 
       if (connection === 'close') {
         session.connected = false;
-
         session.connecting = false;
-
         session.closed = true;
 
         const statusCode =
@@ -241,12 +174,14 @@ async function createSession(telegramId) {
 
         if (shouldReconnect) {
           setTimeout(() => {
-            createSession(id).catch(err => {
-              console.error(
-                `[multi-session] reconnect failed for ${id}:`,
-                err.message
-              );
-            });
+            createSession(id).catch(
+              err => {
+                console.error(
+                  `[multi-session] reconnect failed for ${id}:`,
+                  err.message
+                );
+              }
+            );
           }, 3000);
         }
       }
@@ -269,7 +204,7 @@ async function requestPairingCode(
 
   if (!/^\d{8,15}$/.test(phone)) {
     throw new Error(
-      'Invalid phone number. Use international format without + or spaces.'
+      'Invalid phone number. Use international format without +, spaces or symbols.'
     );
   }
 
@@ -287,43 +222,40 @@ async function requestPairingCode(
     );
   }
 
-  if (
-    session.pairingRequested &&
-    session.pairingCode
-  ) {
-    return session.pairingCode;
+  if (session.closed) {
+    throw new Error(
+      'WhatsApp connection has already closed. Please try /pair again.'
+    );
   }
 
   session.phone = phone;
 
-  console.log(
-    `[multi-session] Preparing pairing code for ${id} (${phone})`
-  );
-
   /*
-   * Baileys documentation recommends requesting
-   * the pairing code from the connection.update
-   * lifecycle rather than guessing with a timer.
+   * Give the initial WhatsApp Web connection
+   * time to establish before requesting the code.
    */
-
-  await waitForConnection(
-    session.sock
+  await new Promise(resolve =>
+    setTimeout(resolve, 10000)
   );
-
-  if (session.connected) {
-    throw new Error(
-      'WhatsApp connected before a pairing code was requested.'
-    );
-  }
 
   if (session.closed) {
     throw new Error(
-      'WhatsApp connection closed before pairing code request.'
+      'WhatsApp connection closed before the pairing code could be requested.'
+    );
+  }
+
+  if (session.connected) {
+    throw new Error(
+      'WhatsApp connected before the pairing code was requested.'
     );
   }
 
   try {
     session.pairingRequested = true;
+
+    console.log(
+      `[multi-session] Requesting pairing code for ${id}`
+    );
 
     const code =
       await session.sock.requestPairingCode(
@@ -334,14 +266,13 @@ async function requestPairingCode(
       String(code);
 
     console.log(
-      `[multi-session] Pairing code generated for ${id}: ${session.pairingCode}`
+      `[multi-session] Pairing code generated for Telegram ${id}`
     );
 
     return session.pairingCode;
 
   } catch (err) {
     session.pairingRequested = false;
-
     session.pairingCode = null;
 
     console.error(
