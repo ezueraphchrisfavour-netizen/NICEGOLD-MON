@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: nicegold-mon
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    disk:
+      name: nicegold-mon-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
